@@ -27,6 +27,7 @@ public class Program
         string? controllerAddress = null;
         string? baseUrlOverride = null;
         string? runIdOverride = null;
+        int? nodeIdOverride = null;
         int virtualProcess = 1;
 
 #if DEBUG
@@ -67,6 +68,18 @@ public class Program
                 continue;
             }
 
+            if ((args[i].Equals("--node-id", StringComparison.OrdinalIgnoreCase) || 
+                 args[i].Equals("--prefix", StringComparison.OrdinalIgnoreCase) || 
+                 args[i].Equals("-p", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[i + 1], out int nodeId))
+                {
+                    nodeIdOverride = nodeId;
+                    i++;
+                    continue;
+                }
+            }
+
             // Controller address is the first non-flag argument
             if (!args[i].StartsWith("-") && string.IsNullOrEmpty(controllerAddress))
             {
@@ -78,7 +91,7 @@ public class Program
             ?? "http://localhost:7313";
 
         // Load settings from Postman files (auto-discovery)
-        var settings = SignupActorsSettings.Load(baseUrlOverride, runIdOverride);
+        var settings = SignupActorsSettings.Load(baseUrlOverride, runIdOverride, nodeIdOverride);
 
         // Create HttpClient with optimized settings
         var httpClientHandler = new HttpClientHandler
@@ -104,6 +117,8 @@ public class Program
         Console.WriteLine($"║  Controller: {controllerAddress,-46} ║");
         Console.WriteLine($"║  Base URL:   {settings.BaseUrl,-46} ║");
         Console.WriteLine($"║  Run ID:     {settings.RunId,-46} ║");
+        Console.WriteLine($"║  NodeId:     {settings.WorkerNodeId:D2,-44} ║");
+        Console.WriteLine($"║  Telco:      [{string.Join(",", settings.TelcoDigits)}]{new string(' ', 37)} ║");
         Console.WriteLine($"║  VPs:        {virtualProcess,-46} ║");
         Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
         Console.WriteLine();
@@ -160,6 +175,11 @@ OPTIONS:
     --run-id <string>      Unique Run ID for data uniqueness
                            Default: auto-generated from UTC timestamp
 
+    --node-id, -p <int>    Worker Node ID (0-99) for mobile uniqueness
+                           Each worker process MUST use a unique node ID
+                           to prevent duplicate mobile numbers (16+ workers)
+                           Default: auto-derived from ProcessId+MachineName+RunId
+
     --help, -h             Show this help message
 
 AUTOMATIC CONFIGURATION:
@@ -170,12 +190,17 @@ AUTOMATIC CONFIGURATION:
     No manual ENV setup required if Postman files are present!
 
 ENV OVERRIDES (optional):
-    BASE_URL, VIRTUAL_PROCESS, RUN_ID
+    BASE_URL, VIRTUAL_PROCESS, RUN_ID, WORKER_NODE_ID
     AUTH_CLIENT_ID, AUTH_USERNAME, AUTH_PASSWORD
     HMAC_APP_ID, HMAC_APP_SECRET, PROFILE_ID, OTP_CODE
+    TELCO_DIGITS=0,1,3,7,8 (Yemen prefixes: 70,71,73,77,78)
+
+MOBILE FORMAT:
+    7{TelcoDigit}{NodeId:00}{WorkloadDigit}{Seq:0000} = 9 digits
+    Example: 780305001 = 7 + 8(telco) + 03(nodeId) + 0(workload) + 5001(seq)
 
 EXAMPLE:
-    .\CashlessLoadTest.Worker.exe http://192.168.10.14:7313 --vp 10 --url https://mada21.com:2401 --run-id LT_TEST_01
+    .\CashlessLoadTest.Worker.exe http://192.168.10.14:7313 --vp 10 --run-id TEST -p 03
 ");
     }
 }

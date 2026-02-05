@@ -24,6 +24,12 @@ public class SignupActorsSettings
     public string Scope { get; set; } = "profile roles email phone AgentAppServices";
     public string OtpCode { get; set; } = "004121";
 
+    // Worker Node ID for uniqueness across processes (00-99)
+    public int WorkerNodeId { get; set; } = 0;
+
+    // Yemen telco prefixes: 70, 71, 73, 77, 78 (second digit)
+    public int[] TelcoDigits { get; set; } = [0, 1, 3, 7, 8];
+
     // Run ID for uniqueness
     public string RunId { get; set; } = "";
 
@@ -38,7 +44,7 @@ public class SignupActorsSettings
     /// <summary>
     /// Loads settings from Postman files with CLI/ENV overrides.
     /// </summary>
-    public static SignupActorsSettings Load(string? baseUrlOverride = null, string? runIdOverride = null)
+    public static SignupActorsSettings Load(string? baseUrlOverride = null, string? runIdOverride = null, int? nodeIdOverride = null)
     {
         var settings = new SignupActorsSettings();
 
@@ -196,6 +202,41 @@ public class SignupActorsSettings
             }
         }
 
+        // Worker NodeId: CLI > ENV > auto-default (0-99)
+        if (nodeIdOverride.HasValue)
+        {
+            settings.WorkerNodeId = Math.Abs(nodeIdOverride.Value) % 100;
+        }
+        else
+        {
+            var envNodeId = Environment.GetEnvironmentVariable("WORKER_NODE_ID")?.Trim();
+            if (!string.IsNullOrEmpty(envNodeId) && int.TryParse(envNodeId, out int envNodeIdValue))
+            {
+                settings.WorkerNodeId = Math.Abs(envNodeIdValue) % 100;
+            }
+            else
+            {
+                // Auto-default: derive stable 2-digit from ProcessId + MachineName + RunId
+                var autoNodeId = Math.Abs((Environment.ProcessId + Environment.MachineName.GetHashCode() + settings.RunId.GetHashCode())) % 100;
+                settings.WorkerNodeId = autoNodeId;
+                Console.WriteLine($"[Settings] Auto-generated NodeId from ProcessId+MachineName+RunId");
+            }
+        }
+
+        // Telco digits: ENV override or default
+        var envTelco = Environment.GetEnvironmentVariable("TELCO_DIGITS")?.Trim();
+        if (!string.IsNullOrEmpty(envTelco))
+        {
+            var parsed = envTelco.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => int.TryParse(s.Trim(), out int d) ? d : -1)
+                .Where(d => d >= 0 && d <= 9)
+                .ToArray();
+            if (parsed.Length > 0)
+            {
+                settings.TelcoDigits = parsed;
+            }
+        }
+
         // Log summary
         Console.WriteLine($"[Settings] BaseUrl: {settings.BaseUrl}");
         Console.WriteLine($"[Settings] ClientId: {settings.ClientId}");
@@ -203,6 +244,8 @@ public class SignupActorsSettings
         Console.WriteLine($"[Settings] AppId: {(string.IsNullOrEmpty(settings.AppId) ? "(not set)" : settings.AppId[..Math.Min(8, settings.AppId.Length)] + "...")}");
         Console.WriteLine($"[Settings] ProfileId: {(string.IsNullOrEmpty(settings.ProfileId) ? "(not set - will fail)" : settings.ProfileId)}");
         Console.WriteLine($"[Settings] RunId: {settings.RunId}");
+        Console.WriteLine($"[Settings] WorkerNodeId: {settings.WorkerNodeId:D2}");
+        Console.WriteLine($"[Settings] TelcoDigits: [{string.Join(",", settings.TelcoDigits)}]");
 
         return settings;
     }

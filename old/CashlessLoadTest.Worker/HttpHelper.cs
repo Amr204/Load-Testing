@@ -1,0 +1,276 @@
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+
+namespace CashlessLoadTest.Worker;
+
+// ============================================================================
+// HTTP Helper
+// ============================================================================
+public static class HttpHelper
+{
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.Never
+    };
+
+    public static async Task<HttpResponseResult<T>> SendRequestAsync<T>(
+        HttpClient httpClient,
+        HttpMethod method,
+        string url,
+        object? requestBody = null,
+        string? bearerToken = null,
+        CancellationToken cancellationToken = default,
+        int maxRetries = 3,
+        int retryDelayMs = 1000)
+    {
+        Exception? lastException = null;
+
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(method, url);
+
+                // Add bearer token if provided
+                if (!string.IsNullOrEmpty(bearerToken))
+                {
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);
+                }
+
+                // Add request body if provided
+                if (requestBody != null)
+                {
+                    var json = JsonSerializer.Serialize(requestBody, JsonOptions);
+                    request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                }
+
+                var response = await httpClient.SendAsync(request, cancellationToken);
+
+                // Read response headers
+                var headers = new Dictionary<string, IEnumerable<string>>();
+                foreach (var header in response.Headers)
+                {
+                    headers[header.Key] = header.Value;
+                }
+                foreach (var header in response.Content.Headers)
+                {
+                    headers[header.Key] = header.Value;
+                }
+
+                var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+
+                // Handle success
+                if (response.IsSuccessStatusCode)
+                {
+                    try
+                    {
+                        var data = JsonSerializer.Deserialize<T>(responseBody, JsonOptions);
+                        return HttpResponseResult<T>.Success(data!, (int)response.StatusCode, headers);
+                    }
+                    catch (JsonException ex)
+                    {
+                        // If deserialization fails but status is success, return failure with details
+                        return HttpResponseResult<T>.Failure(
+                            (int)response.StatusCode,
+                            $"Failed to deserialize response: {ex.Message}",
+                            responseBody,
+                            headers
+                        );
+                    }
+                }
+
+                // Handle error response
+                var errorMessage = $"HTTP {(int)response.StatusCode} {response.StatusCode}";
+
+                // Try to extract error from response body
+                try
+                {
+                    var errorObj = JsonSerializer.Deserialize<Dictionary<string, object>>(responseBody, JsonOptions);
+                    if (errorObj != null && errorObj.TryGetValue("error", out var error))
+                    {
+                        errorMessage += $": {error}";
+                    }
+                    else if (errorObj != null && errorObj.TryGetValue("errorMessage", out var errorMsg))
+                    {
+                        errorMessage += $": {errorMsg}";
+                    }
+                }
+                catch
+                {
+                    // Ignore JSON parsing errors for error response
+                }
+
+                // Retry on 5xx errors or 429 (Too Many Requests)
+                if ((int)response.StatusCode >= 500 || response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                {
+                    if (attempt < maxRetries)
+                    {
+                        await Task.Delay(retryDelayMs * (attempt + 1), cancellationToken); // Exponential backoff
+                        continue;
+                    }
+                }
+
+                return HttpResponseResult<T>.Failure((int)response.StatusCode, errorMessage, responseBody, headers);
+            }
+            catch (HttpRequestException ex)
+            {
+                lastException = ex;
+                // Retry on network errors
+                if (attempt < maxRetries)
+                {
+                    await Task.Delay(retryDelayMs * (attempt + 1), cancellationToken);
+                    continue;
+                }
+            }
+            catch (TaskCanceledException ex) when (ex.InnerException is TimeoutException)
+            {
+                lastException = ex;
+                // Retry on timeout
+                if (attempt < maxRetries)
+                {
+                    await Task.Delay(retryDelayMs * (attempt + 1), cancellationToken);
+                    continue;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Don't retry on other exceptions
+                return HttpResponseResult<T>.Failure(0, $"Unexpected error: {ex.Message}", null);
+            }
+        }
+
+        // All retries exhausted
+        return HttpResponseResult<T>.Failure(
+            0,
+            $"Request failed after {maxRetries + 1} attempts. Last error: {lastException?.Message ?? "Unknown"}",
+            null
+        );
+    }
+
+    public static async Task<HttpResponseResult<T>> SendFormUrlEncodedAsync<T>(
+        HttpClient httpClient,
+        string url,
+        IEnumerable<KeyValuePair<string, string>> formData,
+        CancellationToken cancellationToken = default,
+        int maxRetries = 3,
+        int retryDelayMs = 1000,
+        Dictionary<string, string>? customHeaders = null)
+    {
+        Exception? lastException = null;
+
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, url)
+                {
+                    Content = new FormUrlEncodedContent(formData)
+                };
+
+                // Add custom headers if provided
+                if (customHeaders != null)
+                {
+                    foreach (var header in customHeaders)
+                    {
+                        request.Headers.Add(header.Key, header.Value);
+                    }
+                }
+
+                var response = await httpClient.SendAsync(request, cancellationToken);
+
+                var headers = new Dictionary<string, IEnumerable<string>>();
+                foreach (var header in response.Headers)
+                {
+                    headers[header.Key] = header.Value;
+                }
+                foreach (var header in response.Content.Headers)
+                {
+                    headers[header.Key] = header.Value;
+                }
+
+                var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    try
+                    {
+                        var data = JsonSerializer.Deserialize<T>(responseBody, JsonOptions);
+                        return HttpResponseResult<T>.Success(data!, (int)response.StatusCode, headers);
+                    }
+                    catch (JsonException ex)
+                    {
+                        return HttpResponseResult<T>.Failure(
+                            (int)response.StatusCode,
+                            $"Failed to deserialize response: {ex.Message}",
+                            responseBody,
+                            headers
+                        );
+                    }
+                }
+
+                var errorMessage = $"HTTP {(int)response.StatusCode} {response.StatusCode}";
+
+                // Try to extract error from response
+                try
+                {
+                    var errorObj = JsonSerializer.Deserialize<Dictionary<string, object>>(responseBody, JsonOptions);
+                    if (errorObj != null && errorObj.TryGetValue("error", out var error))
+                    {
+                        errorMessage += $": {error}";
+                    }
+                    else if (errorObj != null && errorObj.TryGetValue("error_description", out var errorDesc))
+                    {
+                        errorMessage += $": {errorDesc}";
+                    }
+                }
+                catch
+                {
+                    // Ignore JSON parsing errors
+                }
+
+                // Retry on 5xx or 429
+                if ((int)response.StatusCode >= 500 || response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                {
+                    if (attempt < maxRetries)
+                    {
+                        await Task.Delay(retryDelayMs * (attempt + 1), cancellationToken);
+                        continue;
+                    }
+                }
+
+                return HttpResponseResult<T>.Failure((int)response.StatusCode, errorMessage, responseBody, headers);
+            }
+            catch (HttpRequestException ex)
+            {
+                lastException = ex;
+                if (attempt < maxRetries)
+                {
+                    await Task.Delay(retryDelayMs * (attempt + 1), cancellationToken);
+                    continue;
+                }
+            }
+            catch (TaskCanceledException ex) when (ex.InnerException is TimeoutException)
+            {
+                lastException = ex;
+                if (attempt < maxRetries)
+                {
+                    await Task.Delay(retryDelayMs * (attempt + 1), cancellationToken);
+                    continue;
+                }
+            }
+            catch (Exception ex)
+            {
+                return HttpResponseResult<T>.Failure(0, $"Unexpected error: {ex.Message}", null);
+            }
+        }
+
+        return HttpResponseResult<T>.Failure(
+            0,
+            $"Request failed after {maxRetries + 1} attempts. Last error: {lastException?.Message ?? "Unknown"}",
+            null
+        );
+    }
+}

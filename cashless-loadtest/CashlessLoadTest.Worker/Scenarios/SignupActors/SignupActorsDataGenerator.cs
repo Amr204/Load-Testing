@@ -15,13 +15,13 @@ public class GeneratedActorData
 
 /// <summary>
 /// Generates unique Mobile/UserName for load testing.
-/// Uses nodeCode (from machine+runId) + counter for cross-worker uniqueness.
+/// Format: 7{TelcoDigit}{NodeId:00}{WorkloadDigit}{Seq:0000} = 9 digits
 /// </summary>
 public class SignupActorsDataGenerator
 {
     private static long _globalCounter = 0;
-    private readonly int _nodeCode;
-    private readonly string _nodeLetters;
+    private readonly SignupActorsSettings _settings;
+    private static readonly ThreadLocal<Random> _random = new(() => new Random(Guid.NewGuid().GetHashCode()));
 
     // Large name lists (100+ names)
     private static readonly string[] FirstNames = new[]
@@ -68,32 +68,38 @@ public class SignupActorsDataGenerator
 
     public SignupActorsDataGenerator(SignupActorsSettings settings)
     {
-        // Compute nodeCode from MachineName + RunId for cross-worker uniqueness
-        var nodeHash = Math.Abs((Environment.MachineName + settings.RunId).GetHashCode());
-        _nodeCode = nodeHash % 100; // 2 digits: 00-99
-        _nodeLetters = ConvertToLetters(_nodeCode);
+        _settings = settings;
+        Console.WriteLine($"[DataGenerator] NodeId: {_settings.WorkerNodeId:D2}, TelcoDigits: [{string.Join(",", _settings.TelcoDigits)}]");
 
-        Console.WriteLine($"[DataGenerator] NodeCode: {_nodeCode:D2}, NodeLetters: {_nodeLetters}");
+#if DEBUG
+        // Self-check: generate 5000 mobiles and verify no duplicates within process
+        if (Environment.GetEnvironmentVariable("SELFCHECK_DUPLICATES") == "1")
+        {
+            SelfCheckDuplicates(5000);
+        }
+#endif
     }
 
     /// <summary>
     /// Generates unique actor data for registration.
+    /// Mobile format: 7{TelcoDigit}{NodeId:00}{WorkloadDigit}{Seq:0000} = 9 digits
+    /// where TelcoDigit ∈ {0,1,3,7,8}, NodeId = 00-99, W = workloadIndex % 10, Seq = 0000-9999
     /// </summary>
-    public GeneratedActorData Generate()
+    public GeneratedActorData Generate(int workloadIndex)
     {
         var counter = Interlocked.Increment(ref _globalCounter);
-        var random = new Random((int)(counter ^ DateTime.UtcNow.Ticks));
+        var random = _random.Value!;
 
-        // Mobile: 79 + nodeCode(1 digit) + counter(6 digits) = 9 digits total
-        // Format: 79XNNNNNN where X=nodeCode(1 digit), N=counter(6 digits)
-        var counterPart = counter % 1_000_000;
-        var nodeDigit = _nodeCode % 10; // Use only 1 digit from nodeCode
-        var mobile = $"78{nodeDigit}{counterPart:D6}";
+        // Mobile: 7{T}{NN}{W}{SSSS} = 9 digits
+        var telcoDigits = _settings.TelcoDigits;
+        var T = telcoDigits[random.Next(telcoDigits.Length)]; // Yemen telco: 70,71,73,77,78
+        var NN = _settings.WorkerNodeId;                       // 00-99 (worker uniqueness)
+        var W = workloadIndex % 10;                            // 0-9 (VU uniqueness)
+        var S = counter % 10_000;                              // 0000-9999 (sequence)
+        var mobile = $"7{T}{NN:D2}{W}{S:D4}";
 
-        // UserName: letters only - prefix + nodeLetters + counter letters
-        var prefixLetters = GenerateRandomLetters(random, 2);
-        var counterLetters = ConvertToLetters(counter);
-        var userName = $"{prefixLetters}{_nodeLetters}{counterLetters}";
+        // UserName: same as mobile
+        var userName = mobile;
 
         // Random names from lists
         var firstName = FirstNames[random.Next(FirstNames.Length)];
@@ -111,6 +117,7 @@ public class SignupActorsDataGenerator
             LastName = lastName
         };
     }
+
 
     /// <summary>
     /// Converts number to base26 letters (a-z).
@@ -159,4 +166,33 @@ public class SignupActorsDataGenerator
     /// Gets current counter value.
     /// </summary>
     public static long GetCounter() => Interlocked.Read(ref _globalCounter);
+
+#if DEBUG
+    /// <summary>
+    /// Self-check: generate N mobiles and assert no duplicates.
+    /// </summary>
+    private void SelfCheckDuplicates(int count)
+    {
+        var mobiles = new HashSet<string>();
+        Console.WriteLine($"[DataGenerator] Running self-check with {count} mobiles...");
+
+        for (int i = 0; i < count; i++)
+        {
+            var data = Generate(i % 10); // simulate different workload indices
+            if (!mobiles.Add(data.Mobile))
+            {
+                Console.WriteLine($"[DataGenerator] DUPLICATE FOUND: {data.Mobile}");
+            }
+        }
+
+        // Log example breakdown
+        var example = Generate(5);
+        var T = example.Mobile[1];
+        var NN = example.Mobile.Substring(2, 2);
+        var W = example.Mobile[4];
+        var S = example.Mobile.Substring(5, 4);
+        Console.WriteLine($"[DataGenerator] Example: {example.Mobile} (T={T}, NN={NN}, W={W}, S={S})");
+        Console.WriteLine($"[DataGenerator] Self-check complete. {mobiles.Count}/{count} unique mobiles.");
+    }
+#endif
 }

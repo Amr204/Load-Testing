@@ -95,8 +95,8 @@ public class SignupActorsWorkload : Workload
             return;
         }
 
-        // Step 2: Generate unique data
-        var actorData = _dataGenerator.Generate();
+        // Step 2: Generate unique data with workload index for VU uniqueness
+        var actorData = _dataGenerator.Generate(context.WorkloadIndex);
 
         // Step 3: Build register body from Postman template
         var registerBody = BuildRegisterBody(actorData);
